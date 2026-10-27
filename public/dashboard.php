@@ -8,6 +8,7 @@ use IO\Support\Logger;
 use IO\Storage\Database;
 use IO\Storage\RoleMapStore;
 use IO\Services\Schedule\ScheduleFactory;
+use IO\Services\UniFiSync;
 use IO\Support\AppConfig;
 
 $logger = new Logger();
@@ -51,6 +52,21 @@ foreach ($existing as $row) {
 }
 
 $finalScheduleOutput = null;
+$syncResult = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['run_sync'])) {
+    set_time_limit(0);
+    if (!hash_equals($_SESSION['csrf'] ?? '', (string) ($_POST['csrf'] ?? ''))) {
+        $error = 'This form expired. Reload the page and try again.';
+    } else {
+        try {
+            $syncResult = (new UniFiSync($logger, $roleMapStore, __DIR__ . '/../data/cards_import.csv'))->run(true);
+        } catch (Throwable $e) {
+            $error = 'Synchronise failed: ' . $e->getMessage();
+            $logger->error($error);
+        }
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['show_schedule'])) {
     try {
@@ -83,8 +99,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['show_schedule'])) {
 
 <h1>Admin Dashboard</h1>
 
+<form method="post" action="dashboard.php" onsubmit="return confirm('Update UniFi Access from Gibbon? This writes schedules, policies, users, and card assignments.');">
+    <input type="hidden" name="csrf" value="<?= htmlspecialchars($_SESSION['csrf'] ?? '') ?>">
+    <button type="submit" name="run_sync" value="1">Synchronise</button>
+</form>
+<p class="note">Sends Gibbon Manage Access Cards to UniFi Access. An active card grants that person’s role schedule. Setting the card to inactive removes their UniFi access policy and AC- card.</p>
+
 <?php if ($error): ?>
     <p class="error">Error: <?= htmlspecialchars($error) ?></p>
+<?php endif; ?>
+
+<?php if (is_array($syncResult)): ?>
+    <div class="log">
+        <p class="pass">Synchronise applied. <?= (int) $syncResult['people'] ?> people granted access.</p>
+        <ul>
+            <?php foreach (['schedules' => 'Schedules', 'policies' => 'Policies', 'users' => 'Users', 'access' => 'User access'] as $key => $label): ?>
+                <li>
+                    <?= htmlspecialchars($label) ?>:
+                    <?php if (empty($syncResult['summary'][$key])): ?>
+                        none
+                    <?php else: ?>
+                        <?php
+                            $parts = [];
+                            foreach ($syncResult['summary'][$key] as $name => $count) {
+                                $parts[] = $count . ' ' . $name;
+                            }
+                            echo htmlspecialchars(implode(', ', $parts));
+                        ?>
+                    <?php endif; ?>
+                </li>
+            <?php endforeach; ?>
+            <li>Cards: <?= htmlspecialchars((string) $syncResult['summary']['cards']) ?></li>
+        </ul>
+    </div>
 <?php endif; ?>
 
 <h2>Role → Schedule Type Mapping</h2>

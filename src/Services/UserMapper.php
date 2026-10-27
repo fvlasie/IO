@@ -10,7 +10,7 @@ class UserMapper
         $this->config = $config;
     }
 
-    public function IOtoAP(array $gibbonUser, array $schedule, array $cards): array
+    public function IOtoAP(array $gibbonUser, array $schedule, array $cards, bool $access = true): array
     {
         // Identity
         $email     = $gibbonUser['email'] ?? null;
@@ -47,7 +47,10 @@ class UserMapper
             'role'      => $role,
 
             // Cards unchanged
-            'cards'     => $normalizedCards
+            'cards'     => $normalizedCards,
+
+            // false when a Gibbon admin has set the access card to inactive
+            'access'    => $access,
         ];
     }
 }

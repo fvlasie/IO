@@ -6,21 +6,12 @@ ini_set('html_errors', '0');
 
 require __DIR__ . '/../vendor/autoload.php';
 
-use IO\Services\AccessPayload;
-use IO\Services\Schedule\ScheduleFactory;
-use IO\Services\UserMapper;
+use IO\Services\UniFiSync;
 use IO\Storage\Database;
 use IO\Storage\RoleMapStore;
-use IO\Support\AppConfig;
 use IO\Support\Logger;
-use IO\UniFi\AccessClient;
-use IO\UniFi\Converter;
-use IO\UniFi\Pass1_Schedules;
-use IO\UniFi\Pass2_Policies;
-use IO\UniFi\Pass3_UsersAndCards;
 
 $logger = new Logger();
-$config = AppConfig::load();
 $options = getopt('', ['user::', 'schedule-types', 'write']);
 $write = isset($options['write']);
 
@@ -55,36 +46,16 @@ fwrite(STDERR, $write
     : "Dry run. Pass --write to apply changes.\n");
 
 try {
-    $db = new Database(__DIR__ . '/../data/io.db');
-    $gibbon = AppConfig::gibbon($logger);
-    $factory = new ScheduleFactory(new RoleMapStore($db), $gibbon);
-    $payload = new AccessPayload($gibbon, $factory, new UserMapper($config));
-    $users = $payload->build($options['user'] ?? null);
-
-    $client = new AccessClient($config['unifi']);
-    $pass1 = new Pass1_Schedules($client, $write, $config['unifi']);
-    $scheduleResults = $pass1->run(Converter::convertSchedules($users));
-
-    $pass2 = new Pass2_Policies($client, $write, fn($msg) => $logger->info($msg));
-    $policyResults = $pass2->run();
-
-    $pass3 = new Pass3_UsersAndCards(
-        $client,
-        $users,
-        $write,
-        __DIR__ . '/../data/cards_import.csv',
-        true
+    $sync = new UniFiSync(
+        $logger,
+        new RoleMapStore(new Database(__DIR__ . '/../data/io.db')),
+        __DIR__ . '/../data/cards_import.csv'
     );
-    $usersResult = $pass3->run();
 
-    echo json_encode([
-        'status'          => 'ok',
-        'phase'           => $write ? 'write' : 'dry-run',
-        'people'          => count($users),
-        'schedules'       => $scheduleResults,
-        'policies'        => $policyResults,
-        'users_and_cards' => $usersResult,
-    ], JSON_PRETTY_PRINT) . PHP_EOL;
+    echo json_encode(
+        $sync->run($write, $options['user'] ?? null),
+        JSON_PRETTY_PRINT
+    ) . PHP_EOL;
 } catch (Throwable $e) {
     fwrite(STDERR, "Sync error: " . $e->getMessage() . "\n");
     exit(1);

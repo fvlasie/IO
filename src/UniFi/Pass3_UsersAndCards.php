@@ -9,19 +9,22 @@ class Pass3_UsersAndCards
     private bool $write;
     private string $csvPath;
     private bool $nukeCardsBeforeImport;
+    private bool $revokeMissing;
 
     public function __construct(
         AccessClient $client,
         array $mappedUsers,
         bool $write = false,
         string $csvPath = 'cards_import.csv',
-        bool $nukeCardsBeforeImport = false
+        bool $nukeCardsBeforeImport = false,
+        bool $revokeMissing = true
     ) {
         $this->client = $client;
         $this->mappedUsers = $mappedUsers;
         $this->write = $write;
         $this->csvPath = $csvPath;
         $this->nukeCardsBeforeImport = $nukeCardsBeforeImport;
+        $this->revokeMissing = $revokeMissing;
     }
 
     public function run(): array
@@ -39,14 +42,36 @@ class Pass3_UsersAndCards
         $uaPoliciesByName = $this->indexUaPoliciesByName($this->fetchUaPolicies());
 
         $csvRows = [];
+        $grantedUsernames = [];
+        $clearedUserIds = [];
 
         foreach ($this->mappedUsers as $u) {
             $email = strtolower(trim($u['email'] ?? ''));
+            $username = strtolower(trim($u['username'] ?? ''));
+
+            if (($u['access'] ?? true) === false) {
+                $cleared = $this->clearUserAccess(
+                    $uaUsersByEmail[$email] ?? null,
+                    'gibbon card inactive'
+                );
+                if ($cleared !== null) {
+                    $results['policies'][] = $cleared;
+                    if (!empty($cleared['user_id'])) {
+                        $clearedUserIds[$cleared['user_id']] = true;
+                    }
+                }
+                continue;
+            }
+
             $uid = strtoupper(trim($u['cards'][0]['uid'] ?? ''));
 
             if ($email === '' || $uid === '') {
                 error_log("AP CLI: Skipping user with missing email or card UID: " . json_encode($u));
                 continue;
+            }
+
+            if ($username !== '') {
+                $grantedUsernames[$username] = true;
             }
 
             $policyName = $this->determinePolicyNameForUser($u);
@@ -77,6 +102,13 @@ class Pass3_UsersAndCards
                 'uid'         => $uid,
                 'alias' => 'AC-' . ($u['username'] ?? ''),
             ];
+        }
+
+        if ($this->revokeMissing) {
+            $uaUsersById = $this->indexUaUsersById($this->fetchUaUsers());
+            foreach ($this->revokeCardsNotGranted($grantedUsernames, $uaUsersById, $clearedUserIds) as $cleared) {
+                $results['policies'][] = $cleared;
+            }
         }
 
         $this->writeCsv($csvRows);
@@ -116,6 +148,17 @@ class Pass3_UsersAndCards
             $email = strtolower(trim($u['user_email'] ?? ''));
             if ($email !== '') {
                 $indexed[$email] = $u;
+            }
+        }
+        return $indexed;
+    }
+
+    private function indexUaUsersById(array $users): array
+    {
+        $indexed = [];
+        foreach ($users as $u) {
+            if (!empty($u['id'])) {
+                $indexed[$u['id']] = $u;
             }
         }
         return $indexed;
@@ -317,6 +360,104 @@ class Pass3_UsersAndCards
             'added'   => array_values($toAdd),
             'removed' => array_values($toRemove),
         ];
+    }
+
+    /**
+     * Remove every UniFi access policy from a user a Gibbon admin has deactivated.
+     * Returns null when there is nothing to remove.
+     */
+    private function clearUserAccess(?array $uaUser, string $reason): ?array
+    {
+        if ($uaUser === null || empty($uaUser['id'])) {
+            return null;
+        }
+
+        $email = strtolower(trim($uaUser['user_email'] ?? ''));
+        $userId = $uaUser['id'];
+        $resp = $this->client->get("/api/v1/developer/users/{$userId}/access_policies");
+        $currentPolicies = $this->decodeBody($resp['body'])['data'] ?? [];
+
+        $currentNames = [];
+        foreach ($currentPolicies as $policy) {
+            $name = $policy['name'] ?? '';
+            if ($name !== '') {
+                $currentNames[] = $name;
+            }
+        }
+
+        if ($currentNames === []) {
+            return null;
+        }
+
+        error_log("AP CLI: Removing UniFi access for {$email}: " . json_encode($currentNames));
+
+        if ($this->write) {
+            $put = $this->client->put("/api/v1/developer/users/{$userId}/access_policies", [
+                'access_policy_ids' => [],
+            ]);
+            if (($put['http_status'] ?? 0) !== 200) {
+                error_log("AP CLI: UA rejected access removal for {$email}: " . json_encode($put));
+                return [
+                    'email'   => $email,
+                    'user_id' => $userId,
+                    'policy'  => '',
+                    'status'  => 'revoke_failed',
+                    'reason'  => $reason,
+                ];
+            }
+        }
+
+        return [
+            'email'   => $email,
+            'user_id' => $userId,
+            'policy'  => '',
+            'status'  => 'removed',
+            'reason'  => $reason,
+            'removed' => $currentNames,
+        ];
+    }
+
+    /**
+     * AC- cards still on the console for people who are no longer granted in Gibbon.
+     * The current Access API omits inactive cards, so the leftover card is the revoke signal.
+     *
+     * @param array<string, bool> $grantedUsernames
+     * @param array<string, array> $uaUsersById
+     * @param array<string, bool> $alreadyCleared
+     * @return array<int, array>
+     */
+    private function revokeCardsNotGranted(array $grantedUsernames, array $uaUsersById, array $alreadyCleared): array
+    {
+        $results = [];
+        $cards = $this->client->listOrFail('/api/v1/developer/credentials/nfc_cards/tokens');
+
+        foreach ($cards as $card) {
+            $alias = (string) ($card['alias'] ?? '');
+            if (!str_starts_with($alias, 'AC-')) {
+                continue;
+            }
+
+            $username = strtolower(substr($alias, 3));
+            if ($username === '' || isset($grantedUsernames[$username])) {
+                continue;
+            }
+
+            $userId = (string) ($card['user_id'] ?? '');
+            if ($userId === '' || isset($alreadyCleared[$userId])) {
+                continue;
+            }
+            $alreadyCleared[$userId] = true;
+
+            $cleared = $this->clearUserAccess(
+                $uaUsersById[$userId] ?? ['id' => $userId, 'user_email' => $username],
+                'gibbon card inactive'
+            );
+            if ($cleared !== null) {
+                $results[] = $cleared;
+            }
+        }
+
+        return $results;
     }
 // -------------------------------------------------------------------------
 // CSV generation + import

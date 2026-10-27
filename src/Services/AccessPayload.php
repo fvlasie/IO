@@ -15,14 +15,14 @@ class AccessPayload
     }
 
     /**
-     * People with a Gibbon ID card, in the shape the UniFi sync consumes.
+     * People a Gibbon admin has granted or removed on Manage Access Cards.
+     * An active card is granted. active N is a revoke. People with no card row are ignored.
      *
      * @return array<int, array>
      */
     public function build(?string $onlyUsername = null): array
     {
-        $allUsers = $this->gibbon->fetchUsers()['users'] ?? [];
-        $users = array_filter($allUsers, fn($user) => ($user['status'] ?? '') === 'Full');
+        $users = $this->gibbon->fetchUsers()['users'] ?? [];
 
         if ($onlyUsername !== null && $onlyUsername !== '') {
             $users = array_filter($users, fn($user) => ($user['username'] ?? '') === $onlyUsername);
@@ -35,7 +35,19 @@ class AccessPayload
                 continue;
             }
 
-            if (empty($user['idCard'])) {
+            $active = strtoupper(trim((string) ($user['active'] ?? '')));
+            $hasCard = !empty($user['idCard']);
+            $revoked = $active === 'N';
+
+            if (!$revoked && !$hasCard) {
+                continue;
+            }
+
+            if ($revoked) {
+                $output[] = $this->mapper->IOtoAP($user, [
+                    'type' => 'no_access',
+                    'week_schedule' => [],
+                ], [], false);
                 continue;
             }
 
@@ -45,7 +57,7 @@ class AccessPayload
             ]];
 
             $schedule = $this->schedules->forUserWeekly($user['id'] ?? '', $username, $user);
-            $output[] = $this->mapper->IOtoAP($user, $schedule, $cards);
+            $output[] = $this->mapper->IOtoAP($user, $schedule, $cards, true);
         }
 
         return $output;

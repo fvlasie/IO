@@ -121,7 +121,7 @@ $appConfig = AppConfig::load();
 
     <script>
         let currentTabFile = 'dashboard.php';
-        const ajaxPages = ['diagnostic.php', 'unifi.php', 'settings.php'];
+        const ajaxPages = ['dashboard.php', 'diagnostic.php', 'unifi.php', 'settings.php'];
 
         function ajaxTarget(form) {
             if (!form || !form.closest('#content')) {
@@ -166,10 +166,14 @@ $appConfig = AppConfig::load();
         }
 
         document.addEventListener('submit', function (e) {
-            if (!ajaxTarget(e.target)) {
+            if (e.defaultPrevented || !ajaxTarget(e.target)) {
                 return;
             }
             e.preventDefault();
+            if (e.submitter) {
+                e.submitter.disabled = true;
+                e.submitter.textContent = 'Working…';
+            }
             postForm(e.target, e.submitter);
         });
 
