@@ -45,7 +45,7 @@ class Pass2_Policies
             $desired = [
                 'name'        => $policyName,
                 'schedule_id' => $scheduleId,
-                'resource'    => $doors,
+                'resources'   => $doors,
             ];
 
             $existing = $policies[$policyName] ?? null;
@@ -60,7 +60,7 @@ class Pass2_Policies
                         'policy'       => $policyName,
                         'action'       => 'created',
                         'schedule_id'  => $scheduleId,
-                        'resource'     => $doors,
+                        'resources'    => $doors,
                         'http_status'  => $created['http_status'] ?? null,
                         'ua_code'      => $created['ua_code'] ?? null,
                         'ua_msg'       => $created['ua_msg'] ?? null,
@@ -185,7 +185,8 @@ class Pass2_Policies
         // Compare resource IDs only
         $existingResources = $existing['resource'] ?? $existing['resources'] ?? [];
         $existingIds = array_map(fn($r) => $r['id'] ?? '', is_array($existingResources) ? $existingResources : []);
-        $desiredIds  = array_map(fn($r) => $r['id'] ?? '', $desired['resource'] ?? []);
+        $desiredResources = $desired['resources'] ?? $desired['resource'] ?? [];
+        $desiredIds  = array_map(fn($r) => $r['id'] ?? '', is_array($desiredResources) ? $desiredResources : []);
 
         sort($existingIds);
         sort($desiredIds);

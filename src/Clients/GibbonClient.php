@@ -85,7 +85,8 @@ class GibbonClient
         return [
             'response' => $response['raw'] ?? json_encode($response['data'] ?? []),
             'info'     => [
-                'http_code' => $response['code'] ?? 0
+                'http_code' => $response['code'] ?? 0,
+                'location'  => $response['location'] ?? null,
             ],
             'error'    => $response['error'] ?? null
         ];

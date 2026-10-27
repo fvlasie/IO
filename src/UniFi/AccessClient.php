@@ -37,7 +37,7 @@ class AccessClient
      */
     public function request(string $method, string $path, ?array $payload = null): array
     {
-        $url = $this->baseUrl . $path;
+        $url = preg_match('#^https?://#i', $path) ? $path : $this->baseUrl . $path;
         $ch = curl_init($url);
         $started = microtime(true);
 
@@ -57,14 +57,23 @@ class AccessClient
         }
 
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($ch, CURLOPT_HEADER, true);
         $this->applySsl($ch);
 
         $raw = curl_exec($ch);
         $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $headerSize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
         $error = curl_error($ch);
         curl_close($ch);
 
-        $json = is_string($raw) ? json_decode($raw, true) : null;
+        $headerText = is_string($raw) ? substr($raw, 0, $headerSize) : '';
+        $bodyText = is_string($raw) ? substr($raw, $headerSize) : '';
+        $location = null;
+        if (preg_match('/^Location:\s*(\S+)/mi', $headerText, $match)) {
+            $location = $this->absoluteUrl($url, trim($match[1]));
+        }
+
+        $json = $bodyText !== '' ? json_decode($bodyText, true) : null;
 
         return [
             'http_status' => $status,
@@ -72,13 +81,39 @@ class AccessClient
             'ua_code'     => is_array($json) ? ($json['code'] ?? null) : null,
             'ua_msg'      => is_array($json) ? ($json['msg'] ?? $json['message'] ?? null) : null,
             'error'       => ($raw === false || $error !== '') ? ($error !== '' ? $error : 'empty response') : null,
+            'location'    => $location,
             'time_ms'     => round((microtime(true) - $started) * 1000, 1),
         ];
     }
 
+    /**
+     * GET may 301 from http to https, or from the UniFi OS portal onto port 12445.
+     * Follow only while the host stays the same, so the API token is not sent elsewhere.
+     */
     public function get(string $path): array
     {
-        return $this->request('GET', $path);
+        $url = $this->baseUrl . $path;
+        $seen = [];
+        $result = null;
+
+        for ($hop = 0; $hop < 5; $hop++) {
+            if (isset($seen[$url])) {
+                break;
+            }
+            $seen[$url] = true;
+            $result = $this->request('GET', $url);
+            $status = $result['http_status'] ?? 0;
+            $next = $result['location'] ?? null;
+            if ($next === null || $status < 300 || $status >= 400) {
+                break;
+            }
+            if (!$this->sameHost($url, $next)) {
+                break;
+            }
+            $url = $next;
+        }
+
+        return $result ?? $this->request('GET', $path);
     }
 
     public function post(string $path, array $payload): array
@@ -285,6 +320,35 @@ class AccessClient
             'holiday_group_id' => $ua['holiday_group_id'] ?? null,
             'holiday_schedule' => $ua['holiday_schedule'] ?? [],
         ];
+    }
+
+    private function absoluteUrl(string $current, string $location): string
+    {
+        if (preg_match('#^https?://#i', $location)) {
+            return $location;
+        }
+
+        $parts = parse_url($current);
+        $origin = ($parts['scheme'] ?? 'https') . '://' . ($parts['host'] ?? '');
+        if (isset($parts['port'])) {
+            $origin .= ':' . $parts['port'];
+        }
+        if (str_starts_with($location, '/')) {
+            return $origin . $location;
+        }
+
+        $path = $parts['path'] ?? '/';
+        $dir = substr($path, 0, (int) strrpos($path, '/') + 1);
+
+        return $origin . $dir . $location;
+    }
+
+    private function sameHost(string $left, string $right): bool
+    {
+        $a = parse_url($left, PHP_URL_HOST);
+        $b = parse_url($right, PHP_URL_HOST);
+
+        return is_string($a) && is_string($b) && strcasecmp($a, $b) === 0;
     }
 
     private function applySsl(\CurlHandle $ch): void

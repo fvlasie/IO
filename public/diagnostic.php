@@ -118,7 +118,12 @@ elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['run_all'])) {
                     <?= $r['status'] === 'success' ? 'PASS' : 'FAIL' ?>
                 </td>
 
-                <td><?= $r['http_code'] ?></td>
+                <td>
+                    <?= $r['http_code'] ?? '—' ?>
+                    <?php if (!empty($r['location'])): ?>
+                        <div class="note">Redirects to <?= htmlspecialchars($r['location']) ?></div>
+                    <?php endif; ?>
+                </td>
                 <td><?= $r['time_ms'] ?? '—' ?></td>
             </tr>
         <?php endforeach; ?>

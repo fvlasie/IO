@@ -37,6 +37,7 @@ class GibbonDiagnosticRunner
                 $results[$endpoint] = [
                     'status'    => $status,
                     'http_code' => $http,
+                    'location'  => $response['info']['location'] ?? null,
                     'body'      => $response['response'],
                     'time_ms'   => $timeMs
                 ];

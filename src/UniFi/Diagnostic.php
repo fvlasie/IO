@@ -177,12 +177,12 @@ class Diagnostic
 
         $hasResource = array_key_exists('resource', $row);
         $hasResources = array_key_exists('resources', $row);
-        if ($hasResources && !$hasResource) {
-            $check['status'] = 'warn';
-            $check['notes'][] = 'Policies came back with resources, and this app sends resource when it creates or updates a policy. Compare may treat every policy as changed.';
+        if ($hasResources) {
+            $check['notes'][] = 'Door assignment field is resources. Create and update send resources. Older responses that still say resource are read the same way.';
         } elseif ($hasResource) {
-            $check['notes'][] = 'Door assignment field is resource, which is what create and update send.';
+            $check['notes'][] = 'Door assignment field is resource. Reads accept that name too.';
         } else {
+            $check['status'] = 'warn';
             $check['notes'][] = 'First policy did not include resource or resources. Fields: ' . implode(', ', array_keys($row));
         }
 
@@ -293,6 +293,18 @@ class Diagnostic
             $check['notes'][] = 'The token needs permission ' . $permission . '. Generate a new one in UniFi Access if this console was updated.';
             if (!empty($resp['ua_msg'])) {
                 $check['notes'][] = (string) $resp['ua_msg'];
+            }
+            return $check;
+        }
+
+        if ($http >= 300 && $http < 400) {
+            $check['status'] = 'fail';
+            $check['summary'] = "HTTP {$http}";
+            if (!empty($resp['location'])) {
+                $check['notes'][] = 'Redirects to ' . $resp['location'];
+                $check['notes'][] = 'That target is a different host, so the API token was not sent there. Put the console URL from that address in Settings. Access API calls belong on port 12445.';
+            } else {
+                $check['notes'][] = 'The console returned a redirect with no Location header.';
             }
             return $check;
         }
