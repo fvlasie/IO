@@ -1,0 +1,412 @@
+<?php
+
+namespace IO\Services\Schedule;
+
+use IO\Storage\RoleMapStore;
+use IO\Clients\GibbonClient;
+use RuntimeException;
+
+class ScheduleFactory
+{
+    private RoleMapStore $roleMap;
+    private GibbonClient $gibbon;
+    private string $lastComputedScheduleType;
+
+    public function __construct(RoleMapStore $roleMap, GibbonClient $gibbon)
+    {
+        $this->roleMap = $roleMap;
+        $this->gibbon  = $gibbon;
+    }
+
+    /**
+     * Compute a WeeklySchedule for a user based on:
+     * - role
+     * - gender
+     * - schedule type mapping
+     * - gender override mapping
+     */
+    public function forUser(string $roleName, ?string $gender): WeeklySchedule
+    {
+        $mapping = $this->roleMap->get($roleName);
+
+        if (!$mapping) {
+            return $this->noAccess();
+        }
+
+        $scheduleType   = $mapping['schedule_type'] ?? 'no_access';
+        $genderOverride = $mapping['gender_override'] ?? null;
+
+        if ($genderOverride) {
+            $scheduleType = $this->applyGenderOverride(
+                $scheduleType,
+                $genderOverride,
+                $gender
+            );
+        }
+
+        return $this->buildSchedule($scheduleType);
+    }
+
+    /**
+     * Gender overrides are stored like:
+     *   male_total
+     *   female_business
+     *   male_class
+     *   female_none
+     */
+    private function applyGenderOverride(string $baseType, string $override, ?string $gender): string
+    {
+        if (!$gender) {
+            return $baseType;
+        }
+
+        [$targetGender, $shortType] = explode('_', $override, 2);
+
+        // Normalize gender input 
+        $gender = strtolower($gender); 
+        if ($gender === 'm') {
+            $gender = 'male'; 
+            } elseif ($gender === 'f') { 
+                $gender = 'female'; 
+            }
+        if (
+            ($targetGender === 'male'   && $gender === 'male') ||
+            ($targetGender === 'female' && $gender === 'female')
+        ) {
+            return $this->mapShortType($shortType);
+        }
+
+        return $baseType;
+    }
+
+    private function mapShortType(string $short): string
+    {
+        return match ($short) {
+            'total'    => 'total_access',
+            'business' => 'business_hours',
+            'class'    => 'class_sessions',
+            'none'     => 'no_access',
+            default    => 'no_access',
+        };
+    }
+
+    private function buildSchedule(string $scheduleType): WeeklySchedule
+    {
+        return match ($scheduleType) {
+            'total_access'   => $this->totalAccess(),
+            'business_hours' => $this->businessHours(),
+            'class_sessions' => $this->classSessions(),
+            'no_access'      => $this->noAccess(),
+            default          => $this->noAccess(),
+        };
+    }
+
+    private function totalAccess(): WeeklySchedule
+    {
+        $s = new WeeklySchedule();
+
+        foreach (array_keys($s->getDays()) as $day) {
+            $s->add($day, '00:00', '23:59');
+        }
+
+        return $s;
+    }
+
+    private function businessHours(): WeeklySchedule
+    {
+        $s = new WeeklySchedule();
+
+        // Call AccessAPI via GibbonClient
+        $result = $this->gibbon->call('timetableDay');
+
+        if (!empty($result['error'])) {
+            throw new \RuntimeException("AccessAPI error: " . $result['error']);
+        }
+
+        $json = json_decode($result['response'], true);
+
+        if (!isset($json['days']) || !is_array($json['days'])) {
+            throw new \RuntimeException("Invalid timetableDay response");
+        }
+
+        foreach ($json['days'] as $day => $times) {
+            $s->add($day, $times['open'], $times['close']);
+        }
+
+        return $s;
+    }
+
+    public function debugBusinessHours(): WeeklySchedule
+    {
+        return $this->businessHours();
+    }
+
+
+    private function classSessionsFrom(array $timetable, string $date): WeeklySchedule
+    {
+        $s = new WeeklySchedule();
+
+        // Convert date → day key (mon, tue, wed...)
+        $day = strtolower(date('D', strtotime($date)));
+
+        foreach ($timetable as $entry) {
+            $start = substr($entry['timeStart'], 0, 5); // HH:MM
+            $end   = substr($entry['timeEnd'], 0, 5);
+
+            $s->add($day, $start, $end);
+        }
+        return $s;
+    }
+
+    public function debugClassSessions(array $timetable, string $date): WeeklySchedule
+    {
+        return $this->classSessionsFrom($timetable);
+    }
+
+    private function noAccess(): WeeklySchedule
+    {
+        return new WeeklySchedule();
+    }
+
+    public function forUserOnDate(?string $id, ?string $user, string $date): array
+    {
+        $identifier = $id ?: $user;
+
+        if (!$identifier) {
+            throw new RuntimeException("Either id or user must be provided");
+        }
+
+        $params = [];
+
+        if (!empty($id)) {
+            $params['id'] = $id;
+        } elseif (!empty($user)) {
+            $params['user'] = $user;
+        } else {
+            throw new \RuntimeException("Either id or user must be provided");
+        }
+
+        $resp = $this->gibbon->call('user', $params);
+
+        $json = json_decode($resp['response'], true);
+
+        $userRecord = $json['user'] ?? null;
+
+        if (!$userRecord) {
+            throw new RuntimeException("User not found: " . ($id ?: $user));
+        }
+
+        $role = $userRecord['roleName'] ?? null;
+        $gender = $userRecord['gender'] ?? null;
+
+        // -------------------------
+        // 3. Determine schedule type
+        // -------------------------  
+        $mapping = $this->roleMap->get($role);
+        $scheduleType = $mapping['schedule_type'] ?? 'no_access';
+
+        // -------------------------
+        // Extract buffer rules
+        // -------------------------
+        $bufferBefore = (int)($mapping['buffer_before'] ?? 0);
+        $bufferAfter  = (int)($mapping['buffer_after']  ?? 0);
+
+        // -------------------------
+        // 4. Apply gender override
+        // -------------------------
+        $genderOverride = $mapping['gender_override'] ?? null;
+
+        // Normalize override if it's an array
+        if (is_array($genderOverride) && $gender) {
+            $genderLower = strtolower($gender);
+
+            if (isset($genderOverride[$genderLower])) {
+                $genderOverride = $genderLower . '_' . $genderOverride[$genderLower];
+            } else {
+                $genderOverride = null;
+            }
+        }
+
+        if ($genderOverride) {
+            $scheduleType = $this->applyGenderOverride(
+                $scheduleType,
+                $genderOverride,
+                $gender
+            );
+        }
+
+        $this->lastComputedScheduleType = $scheduleType;
+
+        // -------------------------
+        // 5. Branch by schedule type
+        // -------------------------
+        switch ($scheduleType) {
+
+            case 'total_access':
+                return [
+                    strtolower(date('D', strtotime($date))) => [
+                        ['start' => '00:00', 'end' => '23:59']
+                    ]
+                ];
+
+            case 'no_access':
+                return [
+                    strtolower(date('D', strtotime($date))) => []
+                ];
+
+            case 'business_hours':
+                $weekly = $this->businessHours();   // returns WeeklySchedule
+                $intervals = $weekly->forDate($date);
+                $dayKey = strtolower(date('D', strtotime($date)));
+
+                return [
+                    $dayKey => $intervals
+                ];
+
+            case 'class_sessions':
+
+                // Build params exactly like the User endpoint
+                $params = [];
+
+                if (!empty($id)) {
+                    $params['id'] = $id;
+                } elseif (!empty($user)) {
+                    $params['user'] = $user;
+                }
+
+                // timetableUser is date-dependent
+                $params['date'] = $date;
+
+                // 6. Load class sessions
+                $resp = $this->gibbon->call('timetableUser', $params);
+                $json = json_decode($resp['response'], true);
+
+                // timetableUser returns "windows"
+                $windows = $json['timetable'] ?? [];
+
+                // 7. Convert windows → WeeklySchedule
+                $weekly = $this->classSessionsFrom($windows, $date);
+
+                // 8. Apply buffer rules
+                $intervals = $this->applyBuffer(
+                    $weekly->forDate($date),
+                    $bufferBefore,
+                    $bufferAfter
+                );
+
+                // 9. Merge overlapping
+                $intervals = $this->mergeIntervals($intervals);
+
+                // 10. Wrap in day key for UI
+                $dayKey = strtolower(date('D', strtotime($date)));
+
+                return [
+                    $dayKey => $intervals
+                ];
+            
+            default:
+                throw new RuntimeException("Unknown schedule type: $scheduleType");
+        }
+    }
+    /**
+     * Apply before/after buffer (in minutes) to each interval.
+     *
+     * @param array $intervals Array of ['start' => 'HH:MM', 'end' => 'HH:MM']
+     * @param int   $before    Minutes before start
+     * @param int   $after     Minutes after end
+     *
+     * @return array Adjusted intervals
+     */
+    private function applyBuffer(array $intervals, int $before, int $after): array
+    {
+        $out = [];
+
+        foreach ($intervals as $interval) {
+            $start = strtotime($interval['start']);
+            $end   = strtotime($interval['end']);
+
+            // Apply buffer
+            $start -= $before * 60;
+            $end   += $after * 60;
+
+            // Clamp to day boundaries
+            $dayStart = strtotime('00:00');
+            $dayEnd   = strtotime('23:59');
+
+            if ($start < $dayStart) $start = $dayStart;
+            if ($end > $dayEnd)     $end   = $dayEnd;
+
+            $out[] = [
+                'start' => date('H:i', $start),
+                'end'   => date('H:i', $end),
+            ];
+        }
+
+        return $out;
+    }
+
+    private function mergeIntervals(array $intervals): array
+    {
+        if (empty($intervals)) {
+            return [];
+        }
+
+        // Sort by start time
+        usort($intervals, function ($a, $b) {
+            return strcmp($a['start'], $b['start']);
+        });
+
+        $merged = [];
+        $current = $intervals[0];
+
+        foreach ($intervals as $interval) {
+            if ($interval['start'] <= $current['end']) {
+                // Overlapping → extend the end time
+                $current['end'] = max($current['end'], $interval['end']);
+            } else {
+                // No overlap → push current and start a new one
+                $merged[] = $current;
+                $current = $interval;
+            }
+        }
+
+        // Push the last interval
+        $merged[] = $current;
+
+        return $merged;
+    }
+
+    public function forUserWeekly(?string $id, ?string $username, array $gibbonUser = []): array
+    {
+        if (!$id && !$username) {
+            throw new RuntimeException("Either id or username must be provided");
+        }
+
+        $days = ['mon','tue','wed','thu','fri','sat','sun'];
+        $weekly = [];
+        $scheduleType = null;
+
+        foreach ($days as $day) {
+            $date = date('Y-m-d', strtotime("next $day"));
+
+            // This returns: ['mon' => [...]] etc.
+            $daily = $this->forUserOnDate($id, $username, $date);
+
+            // Extract the day key
+            $dayKey = array_key_first($daily);
+
+            // Capture schedule type from the first day
+            if ($scheduleType === null) {
+                $scheduleType = $this->lastComputedScheduleType;
+            }
+
+            $weekly[$day] = $daily[$dayKey] ?? [];
+        }
+
+        return [
+            'type'          => $scheduleType,
+            'week_schedule' => $weekly,
+        ];
+    }
+
+}

@@ -1,0 +1,11 @@
+{
+    "name": "io/identity-orchestrator",
+    "description": "Gibbon Access API to UniFi Access on a Dream Machine Pro",
+    "type": "project",
+    "autoload": {
+        "psr-4": {
+            "IO\\": "src/"
+        }
+    },
+    "require": {}
+}

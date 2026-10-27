@@ -1,0 +1,7 @@
+.DS_Store
+/data/settings.json
+/data/cards_import.csv
+/data/*.db
+/data/*.db-*
+/data/*.db-journal
+/logs/*.log
